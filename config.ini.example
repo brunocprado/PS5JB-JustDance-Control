@@ -1,0 +1,40 @@
+# PS5JustDance configuration
+# Copy to /data/PS5JustDance/config.ini on the PS5 (all settings are optional).
+
+# On-screen notifications when loaded and when Just Dance is hooked (default: 1)
+notifications = 1
+
+# Keep real PS Move controllers working on slots without a virtual controller (default: 1)
+passthrough_real = 1
+
+# Report Player 1 as connected immediately even before the first UDP/Web packet arrives (default: 0)
+always_connected = 0
+
+# Automatically hook any CUSA game whose param.sfo title is "Just Dance" or loads libSceMove (default: 1)
+hook_any_move_game = 1
+
+# UDP port for JDM1 (joycon_bridge.py), Cemuhook/DSU, and JSON packets (default: 9052)
+udp_port = 9052
+
+# Built-in HTTP port for the Smartphone Web Controller (default: 8080, 0 = disabled)
+web_port = 8080
+
+# Optional: IP of a PC or Android running BetterJoy / joycond-cemuhook / DSUController.
+# When set, PS5JustDance automatically subscribes to that DSU server on dsu_port (26760).
+# dsu_server_ip = 192.168.1.50
+dsu_port = 26760
+
+# Disconnect a virtual controller slot after N ms of inactivity (default: 5000)
+controller_timeout_ms = 5000
+
+# Accelerometer multiplier for dance scoring sensitivity (0.1 to 5.0, default: 1.0)
+accel_scale = 1.0
+
+# Optional extra CUSA Title ID if using a custom/regional FPKG
+# extra_title_id = CUSA27802
+
+# Debugging options
+stats_logging = 0
+crash_catch = 0
+trace_log = 0
+poll_ms = 1000
