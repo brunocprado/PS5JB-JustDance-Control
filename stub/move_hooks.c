@@ -1,8 +1,9 @@
 /*
     move_hooks.c - PS5JustDance
-    Freestanding, position-independent hooks for libSceMove injected into
-    Just Dance (PS4 ABI, x86-64). Presents up to 4 virtual PlayStation Move
-    controllers driven by Joy-Con or Smartphone motion data written into
+    Freestanding, position-independent hooks for libSceMove and libScePad
+    injected into Just Dance (PS4 ABI, x86-64). Presents up to 4 virtual
+    PlayStation Move controllers plus DualShock 4 UI navigation buttons
+    driven by Joy-Con or Smartphone motion data written into
     g_stub_header.controllers[] by the PS5JustDance daemon.
 
     Compiled with -ffreestanding -mno-sse -mno-sse2 so that game XMM/FPU
@@ -29,6 +30,8 @@ typedef int (*fn_read_state_recent_t)(int handle, int64_t timestamp, SceMoveData
 typedef int (*fn_set_light_sphere_t)(int handle, uint8_t r, uint8_t g, uint8_t b);
 typedef int (*fn_reset_light_sphere_t)(int handle);
 typedef int (*fn_set_vibration_t)(int handle, uint8_t motor);
+typedef int (*fn_pad_read_state_t)(int handle, void *data);
+typedef int (*fn_pad_read_t)(int handle, void *data, int num);
 
 typedef struct handle_entry {
     int handle;       /* <= 0 means unused */
@@ -55,12 +58,14 @@ int stub_hook_read_state_recent(int handle, int64_t timestamp, SceMoveData *data
 int stub_hook_set_light_sphere(int handle, uint8_t r, uint8_t g, uint8_t b);
 int stub_hook_reset_light_sphere(int handle);
 int stub_hook_set_vibration(int handle, uint8_t motor);
+int stub_hook_pad_read_state(int handle, void *data);
+int stub_hook_pad_read(int handle, void *data, int num);
 
 HDR_SECTION stub_header_t g_stub_header = {
     .magic = STUB_MAGIC,
     .abi_version = STUB_ABI_VERSION,
     .flags = STUB_FLAG_PASSTHROUGH_REAL,
-    .num_History = 1,
+    .num_History = 4,
     .image_end = (uint64_t)(uintptr_t)__stub_end,
     .hook_init = (uint64_t)(uintptr_t)stub_hook_init,
     .hook_term = (uint64_t)(uintptr_t)stub_hook_term,
@@ -72,6 +77,8 @@ HDR_SECTION stub_header_t g_stub_header = {
     .hook_set_light_sphere = (uint64_t)(uintptr_t)stub_hook_set_light_sphere,
     .hook_reset_light_sphere = (uint64_t)(uintptr_t)stub_hook_reset_light_sphere,
     .hook_set_vibration = (uint64_t)(uintptr_t)stub_hook_set_vibration,
+    .hook_pad_read_state = (uint64_t)(uintptr_t)stub_hook_pad_read_state,
+    .hook_pad_read = (uint64_t)(uintptr_t)stub_hook_pad_read,
     .controllers = {
         { .accel_bits = { IEEE754_ZERO_BITS, IEEE754_ZERO_BITS, IEEE754_ONE_BITS } },
         { .accel_bits = { IEEE754_ZERO_BITS, IEEE754_ZERO_BITS, IEEE754_ONE_BITS } },
@@ -148,22 +155,18 @@ static int find_slot_by_handle_locked(int handle) {
         if (g_handles[i].handle == handle)
             return i;
     }
-    /* If the game passed a handle that wasn't seen in sceMoveOpen, map low handles or synthetic handles */
     if (handle >= SYNTHETIC_HANDLE_BASE && handle < SYNTHETIC_HANDLE_BASE + SCE_MOVE_MAX_PLAYERS)
         return handle - SYNTHETIC_HANDLE_BASE;
     return -1;
 }
 
 static int alloc_slot_locked(int user_id, int index) {
-    /* Reuse existing slot for the same (user_id, index) if reopened */
     for (int i = 0; i < SCE_MOVE_MAX_PLAYERS; i++) {
         if (g_handles[i].handle > 0 && g_handles[i].user_id == user_id && g_handles[i].index == index)
             return i;
     }
-    /* Prefer matching `index` when in range 0..3 and free */
     if (index >= 0 && index < SCE_MOVE_MAX_PLAYERS && g_handles[index].handle <= 0)
         return index;
-    /* Otherwise take the first free slot */
     for (int i = 0; i < SCE_MOVE_MAX_PLAYERS; i++) {
         if (g_handles[i].handle <= 0)
             return i;
@@ -204,6 +207,46 @@ static void fill_move_sample_locked(int slot, uint64_t min_timestamp_us, SceMove
 
     uint16_t btns = ctrl->buttons;
     uint16_t trig = ctrl->trigger;
+    uint32_t pbtns = ctrl->pad_buttons;
+
+    /*
+        In Just Dance PS4, once a player joins as a PS Move controller, the game
+        navigates menus and dancer/coach selection using PS Move gestures:
+          - Hold T trigger + tilt/flick Left/Right/Up/Down
+        So whenever D-Pad Up/Down/Left/Right is held on the Web UI or Joy-Con,
+        we synthesize both:
+          1. PS Move T-trigger + directional tilt/flick (for Move-owned lobbies)
+          2. Extension port Navigation Controller D-Pad/stick
+          3. DualShock/DualSense ScePadData D-Pad + Left Stick (via scePadReadState)
+    */
+    if (pbtns & (SCE_PAD_BUTTON_LEFT | SCE_PAD_BUTTON_RIGHT | SCE_PAD_BUTTON_UP | SCE_PAD_BUTTON_DOWN)) {
+        btns |= SCE_MOVE_BUTTON_T;
+        trig = 255;
+        if (pbtns & SCE_PAD_BUTTON_LEFT) {
+            out->accel_bits[0] = IEEE754_NEG_HALF_BITS;
+            out->accel_bits[1] = IEEE754_HALF_BITS;
+            out->accel_bits[2] = IEEE754_ZERO_BITS;
+            out->gyro_bits[2]  = IEEE754_GYRO_POS_BITS;
+            out->gyro_bits[1]  = IEEE754_GYRO_NEG_BITS;
+        } else if (pbtns & SCE_PAD_BUTTON_RIGHT) {
+            out->accel_bits[0] = IEEE754_HALF_BITS;
+            out->accel_bits[1] = IEEE754_HALF_BITS;
+            out->accel_bits[2] = IEEE754_ZERO_BITS;
+            out->gyro_bits[2]  = IEEE754_GYRO_NEG_BITS;
+            out->gyro_bits[1]  = IEEE754_GYRO_POS_BITS;
+        } else if (pbtns & SCE_PAD_BUTTON_UP) {
+            out->accel_bits[0] = IEEE754_ZERO_BITS;
+            out->accel_bits[1] = IEEE754_ONE_BITS;
+            out->accel_bits[2] = IEEE754_HALF_BITS;
+            out->gyro_bits[0]  = IEEE754_GYRO_POS_BITS;
+        } else if (pbtns & SCE_PAD_BUTTON_DOWN) {
+            out->accel_bits[0] = IEEE754_ZERO_BITS;
+            out->accel_bits[1] = IEEE754_NEG_HALF_BITS;
+            out->accel_bits[2] = IEEE754_HALF_BITS;
+            out->gyro_bits[0]  = IEEE754_GYRO_NEG_BITS;
+        }
+    }
+
     if (trig > 128)
         btns |= SCE_MOVE_BUTTON_T;
     else if ((btns & SCE_MOVE_BUTTON_T) != 0 && trig == 0)
@@ -212,18 +255,24 @@ static void fill_move_sample_locked(int slot, uint64_t min_timestamp_us, SceMove
     out->pad.digital_buttons = btns;
     out->pad.analog_t = trig;
 
-    /* Extension port neutral centered sticks */
+    /* Extension port (PS Move Navigation controller) sticks & D-Pad */
+    out->ext.status = (pbtns != 0) ? 1 : 0;
+    out->ext.digital1 = (uint16_t)(pbtns & 0xFFu);
+    out->ext.digital2 = (uint16_t)((pbtns >> 8) & 0xFFu);
     out->ext.analog_right_x = 0x80;
     out->ext.analog_right_y = 0x80;
-    out->ext.analog_left_x = 0x80;
-    out->ext.analog_left_y = 0x80;
+    out->ext.analog_left_x  = (pbtns & SCE_PAD_BUTTON_LEFT) ? 0x00 : ((pbtns & SCE_PAD_BUTTON_RIGHT) ? 0xFF : 0x80);
+    out->ext.analog_left_y  = (pbtns & SCE_PAD_BUTTON_UP)   ? 0x00 : ((pbtns & SCE_PAD_BUTTON_DOWN)  ? 0xFF : 0x80);
 
-    /* Ensure strictly increasing timestamp in microseconds */
+    /*
+        Ensure strictly increasing timestamp in microseconds (~4.166 ms = 240 Hz steps)
+        so Just Dance's UbiArt motion integrator receives a continuous stream of samples.
+    */
     uint64_t ts = ctrl->timestamp_us;
     if (ts <= h->last_timestamp_us)
-        ts = h->last_timestamp_us + 2000; /* +2 ms */
+        ts = h->last_timestamp_us + 4166;
     if (ts <= min_timestamp_us)
-        ts = min_timestamp_us + 2000;
+        ts = min_timestamp_us + 4166;
     h->last_timestamp_us = ts;
 
     out->timestamp = ts;
@@ -463,4 +512,85 @@ int stub_hook_set_vibration(int handle, uint8_t motor) {
     if (!is_synthetic && (HDR->flags & STUB_FLAG_PASSTHROUGH_REAL) != 0 && orig != NULL)
         return orig(handle, motor);
     return SCE_MOVE_RETURN_CODE_NO_CONTROLLER_CONNECTED;
+}
+
+/* ---- hooked libScePad entry points (for UI navigation) ---- */
+
+static uint32_t collect_virtual_pad_buttons_locked(void) {
+    uint32_t pad_btns = 0;
+    for (int i = 0; i < SCE_MOVE_MAX_PLAYERS; i++) {
+        if (!HDR->controllers[i].connected)
+            continue;
+        pad_btns |= HDR->controllers[i].pad_buttons;
+        uint16_t mb = HDR->controllers[i].buttons;
+        if (mb & SCE_MOVE_BUTTON_CROSS)    pad_btns |= SCE_PAD_BUTTON_CROSS;
+        if (mb & SCE_MOVE_BUTTON_CIRCLE)   pad_btns |= SCE_PAD_BUTTON_CIRCLE;
+        if (mb & SCE_MOVE_BUTTON_TRIANGLE) pad_btns |= SCE_PAD_BUTTON_TRIANGLE;
+        if (mb & SCE_MOVE_BUTTON_SQUARE)   pad_btns |= SCE_PAD_BUTTON_SQUARE;
+        if (mb & SCE_MOVE_BUTTON_START)    pad_btns |= SCE_PAD_BUTTON_OPTIONS;
+        if (mb & SCE_MOVE_BUTTON_SELECT)   pad_btns |= SCE_PAD_BUTTON_SELECT;
+    }
+    return pad_btns;
+}
+
+static void apply_pad_navigation(ScePadDataPrefix *pad, uint32_t vbtns) {
+    /* Clear deadcoded bit (1 << 31) if no buttons were pressed previously */
+    pad->buttons = (pad->buttons & ~0x80000000u) | vbtns;
+    if (vbtns & SCE_PAD_BUTTON_LEFT)
+        pad->lx = 0x00;
+    else if (vbtns & SCE_PAD_BUTTON_RIGHT)
+        pad->lx = 0xFF;
+    if (vbtns & SCE_PAD_BUTTON_UP)
+        pad->ly = 0x00;
+    else if (vbtns & SCE_PAD_BUTTON_DOWN)
+        pad->ly = 0xFF;
+    if (vbtns & SCE_PAD_BUTTON_L2)
+        pad->l2 = 255;
+    if (vbtns & SCE_PAD_BUTTON_R2)
+        pad->r2 = 255;
+}
+
+int stub_hook_pad_read_state(int handle, void *data) {
+    fn_pad_read_state_t orig = ORIG(fn_pad_read_state_t, orig_pad_read_state);
+    int r = (orig != NULL) ? orig(handle, data) : 0;
+
+    if (r >= 0 && data != NULL) {
+        lock_acquire();
+        uint32_t vbtns = collect_virtual_pad_buttons_locked();
+        lock_release();
+
+        if (vbtns != 0) {
+            apply_pad_navigation((ScePadDataPrefix *)data, vbtns);
+            trace(STUB_TRACE_PAD_INJECT, (uint32_t)handle, vbtns, 0);
+        }
+    }
+    return r;
+}
+
+int stub_hook_pad_read(int handle, void *data, int num) {
+    fn_pad_read_t orig = ORIG(fn_pad_read_t, orig_pad_read);
+    int r = (orig != NULL) ? orig(handle, data, num) : 0;
+
+    if (data != NULL) {
+        lock_acquire();
+        uint32_t vbtns = collect_virtual_pad_buttons_locked();
+        lock_release();
+
+        if (vbtns != 0) {
+            if (r <= 0 && num > 0) {
+                memset(data, 0, 64);
+                ScePadDataPrefix *pad = (ScePadDataPrefix *)data;
+                pad->lx = 0x80;
+                pad->ly = 0x80;
+                pad->rx = 0x80;
+                pad->ry = 0x80;
+                r = 1;
+            }
+            if (r > 0) {
+                apply_pad_navigation((ScePadDataPrefix *)data, vbtns);
+                trace(STUB_TRACE_PAD_INJECT, (uint32_t)handle, vbtns, (uint32_t)r);
+            }
+        }
+    }
+    return r;
 }

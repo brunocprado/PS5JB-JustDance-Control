@@ -1,7 +1,7 @@
 /*
     scemove.h - PS5JustDance
-    PlayStation 4 libSceMove data structures, constants, and return codes
-    (SysV x86-64 ABI).
+    PlayStation 4 libSceMove + libScePad data structures, constants, and
+    return codes (SysV x86-64 ABI).
 
     Licensed under the GNU Lesser General Public License version 2.1, or later.
 */
@@ -34,9 +34,36 @@
 #define SCE_MOVE_BUTTON_CROSS    (1u << 6) /* 0x0040 */
 #define SCE_MOVE_BUTTON_SQUARE   (1u << 7) /* 0x0080 */
 
+/*
+    UI Navigation button bitmasks (ScePadData::buttons, PS4 libScePad ABI).
+    Used when the user taps D-Pad / L1 / R1 / Options on the Web UI or Joy-Con
+    so that Just Dance menus can be navigated directly without a DualSense.
+*/
+#define SCE_PAD_BUTTON_SELECT    (1u << 0)
+#define SCE_PAD_BUTTON_L3        (1u << 1)
+#define SCE_PAD_BUTTON_R3        (1u << 2)
+#define SCE_PAD_BUTTON_OPTIONS   (1u << 3)
+#define SCE_PAD_BUTTON_UP        (1u << 4)
+#define SCE_PAD_BUTTON_RIGHT     (1u << 5)
+#define SCE_PAD_BUTTON_DOWN      (1u << 6)
+#define SCE_PAD_BUTTON_LEFT      (1u << 7)
+#define SCE_PAD_BUTTON_L2        (1u << 8)
+#define SCE_PAD_BUTTON_R2        (1u << 9)
+#define SCE_PAD_BUTTON_L1        (1u << 10)
+#define SCE_PAD_BUTTON_R1        (1u << 11)
+#define SCE_PAD_BUTTON_TRIANGLE  (1u << 12)
+#define SCE_PAD_BUTTON_CIRCLE    (1u << 13)
+#define SCE_PAD_BUTTON_CROSS     (1u << 14)
+#define SCE_PAD_BUTTON_SQUARE    (1u << 15)
+
 /* IEEE-754 bit representations used by the freestanding stub (-mno-sse) */
-#define IEEE754_ZERO_BITS        0x00000000u /* 0.0f  */
-#define IEEE754_ONE_BITS         0x3F800000u /* 1.0f  (1G gravity) */
+#define IEEE754_ZERO_BITS        0x00000000u /*  0.0f  */
+#define IEEE754_ONE_BITS         0x3F800000u /*  1.0f  (1G gravity) */
+#define IEEE754_NEG_ONE_BITS     0xBF800000u /* -1.0f  */
+#define IEEE754_HALF_BITS        0x3F3504F3u /*  0.7071f (45 deg tilt) */
+#define IEEE754_NEG_HALF_BITS    0xBF3504F3u /* -0.7071f (-45 deg tilt) */
+#define IEEE754_GYRO_POS_BITS    0x40800000u /*  4.0f rad/s */
+#define IEEE754_GYRO_NEG_BITS    0xC0800000u /* -4.0f rad/s */
 #define IEEE754_SPHERE_RAD_BITS  0x41B40000u /* 22.5f (mm sphere radius) */
 #define IEEE754_ROOM_TEMP_BITS   0x41C80000u /* 25.0f (Celsius) */
 
@@ -81,5 +108,26 @@ typedef struct SceMoveData {
     int32_t counter;
     uint32_t temperature_bits;
 } SceMoveData;
+
+/*
+    Minimal prefix of ScePadData (PS4 libScePad ABI):
+      offset 0: uint32_t buttons (SCE_PAD_BUTTON_* bitmask)
+      offset 4: uint8_t  leftStick.x  (0x80 = neutral)
+      offset 5: uint8_t  leftStick.y  (0x80 = neutral)
+      offset 6: uint8_t  rightStick.x (0x80 = neutral)
+      offset 7: uint8_t  rightStick.y (0x80 = neutral)
+      offset 8: uint8_t  analogButtons.l2
+      offset 9: uint8_t  analogButtons.r2
+*/
+typedef struct ScePadDataPrefix {
+    uint32_t buttons;
+    uint8_t lx;
+    uint8_t ly;
+    uint8_t rx;
+    uint8_t ry;
+    uint8_t l2;
+    uint8_t r2;
+    uint16_t padding;
+} ScePadDataPrefix;
 
 #endif

@@ -6,7 +6,9 @@ Reads 1 to 4 Nintendo Switch Joy-Cons (Left or Right) over Bluetooth HID
 (via `hid` / `hidapi`), enables the 60Hz 6-axis IMU (accelerometer + gyroscope),
 and streams 36-byte JDM1 UDP packets to PS5JustDance running on the PS5.
 
-Also supports `--simulate` mode to test dancing & menu inputs without a Joy-Con.
+Also maps the Joy-Con analog stick and buttons to PS4/PS5 UI navigation buttons
+(D-Pad Up/Down/Left/Right, Cross, Circle, Options) so you can navigate the
+Just Dance menus directly from the Joy-Con!
 
 Requirements (for real Joy-Con):
     pip install hidapi
@@ -41,20 +43,36 @@ SCE_MOVE_BUTTON_CIRCLE   = 1 << 5
 SCE_MOVE_BUTTON_CROSS    = 1 << 6
 SCE_MOVE_BUTTON_SQUARE   = 1 << 7
 
+SCE_PAD_BUTTON_SELECT    = 1 << 0
+SCE_PAD_BUTTON_OPTIONS   = 1 << 3
+SCE_PAD_BUTTON_UP        = 1 << 4
+SCE_PAD_BUTTON_RIGHT     = 1 << 5
+SCE_PAD_BUTTON_DOWN      = 1 << 6
+SCE_PAD_BUTTON_LEFT      = 1 << 7
+SCE_PAD_BUTTON_L2        = 1 << 8
+SCE_PAD_BUTTON_R2        = 1 << 9
+SCE_PAD_BUTTON_L1        = 1 << 10
+SCE_PAD_BUTTON_R1        = 1 << 11
+SCE_PAD_BUTTON_TRIANGLE  = 1 << 12
+SCE_PAD_BUTTON_CIRCLE    = 1 << 13
+SCE_PAD_BUTTON_CROSS     = 1 << 14
+SCE_PAD_BUTTON_SQUARE    = 1 << 15
+
 # Joy-Con IMU scale factors (standard ±8G, ±2000 dps)
 ACCEL_LSB_TO_G   = 0.000244
 GYRO_LSB_TO_RADS = 0.06103 * (math.pi / 180.0)
 
 
-def pack_jdm1(player_index, source_flags, buttons, trigger, accel, gyro):
+def pack_jdm1(player_index, source_flags, buttons, trigger, pad_buttons, accel, gyro):
     return struct.pack(
-        "<IBBHBBBBffffff",
+        "<IBBHBBHffffff",
         JDM_UDP_MAGIC,
         player_index & 0x03,
         source_flags & 0xFF,
         buttons & 0xFFFF,
         trigger & 0xFF,
-        0, 0, 0,
+        0,
+        pad_buttons & 0xFFFF,
         float(accel[0]), float(accel[1]), float(accel[2]),
         float(gyro[0]), float(gyro[1]), float(gyro[2]),
     )
@@ -82,8 +100,27 @@ def init_joycon(dev, player_slot):
     dev.set_nonblocking(True)
 
 
+def decode_stick_dpad(stick_bytes):
+    """Decodes 3-byte Joy-Con analog stick data into D-Pad bitmask."""
+    if len(stick_bytes) < 3:
+        return 0
+    sx = stick_bytes[0] | ((stick_bytes[1] & 0x0F) << 8)
+    sy = (stick_bytes[1] >> 4) | (stick_bytes[2] << 4)
+    # Center is ~2048, range ~600..3400
+    pad = 0
+    if sx < 1300:
+        pad |= SCE_PAD_BUTTON_LEFT
+    elif sx > 2800:
+        pad |= SCE_PAD_BUTTON_RIGHT
+    if sy < 1300:
+        pad |= SCE_PAD_BUTTON_DOWN
+    elif sy > 2800:
+        pad |= SCE_PAD_BUTTON_UP
+    return pad
+
+
 def parse_joycon_report(report, is_left):
-    """Parses a 0x30 standard Joy-Con input report into (buttons, trigger, accel, gyro)."""
+    """Parses a 0x30 standard Joy-Con input report into (buttons, trigger, pad_buttons, accel, gyro)."""
     if len(report) < 25 or report[0] != 0x30:
         return None
 
@@ -92,42 +129,59 @@ def parse_joycon_report(report, is_left):
     btn_left = report[5]
 
     move_btns = 0
+    pad_btns = 0
     trigger = 0
 
     if not is_left:
-        # Right Joy-Con button mapping -> PS Move
-        if btn_right & 0x08:  # A -> Cross (Confirm)
-            move_btns |= SCE_MOVE_BUTTON_CROSS
+        # Right Joy-Con button mapping -> PS Move + PS4/PS5 UI Pad
+        pad_btns |= decode_stick_dpad(report[9:12])
+        if btn_right & 0x08:  # A -> Cross (Confirm) + Move
+            move_btns |= SCE_MOVE_BUTTON_CROSS | SCE_MOVE_BUTTON_MOVE
+            pad_btns |= SCE_PAD_BUTTON_CROSS
         if btn_right & 0x04:  # B -> Circle (Back)
             move_btns |= SCE_MOVE_BUTTON_CIRCLE
+            pad_btns |= SCE_PAD_BUTTON_CIRCLE
         if btn_right & 0x02:  # X -> Triangle
             move_btns |= SCE_MOVE_BUTTON_TRIANGLE
+            pad_btns |= SCE_PAD_BUTTON_TRIANGLE
         if btn_right & 0x01:  # Y -> Square
             move_btns |= SCE_MOVE_BUTTON_SQUARE
-        if (btn_right & 0x40) or (btn_shared & 0x10):  # R or Home -> Move button
+            pad_btns |= SCE_PAD_BUTTON_SQUARE
+        if (btn_right & 0x40) or (btn_shared & 0x10):  # R or Home -> Move + R1
             move_btns |= SCE_MOVE_BUTTON_MOVE
-        if btn_right & 0x80:  # ZR -> T trigger
-            move_btns |= SCE_MOVE_BUTTON_T
+            pad_btns |= SCE_PAD_BUTTON_R1
+        if btn_right & 0x80:  # ZR -> T trigger + R2
+            move_btns |= SCE_MOVE_BUTTON_T | SCE_MOVE_BUTTON_MOVE
+            pad_btns |= SCE_PAD_BUTTON_R2
             trigger = 255
-        if btn_shared & 0x02:  # Plus -> Start
+        if btn_shared & 0x02:  # Plus -> Start / Options
             move_btns |= SCE_MOVE_BUTTON_START
+            pad_btns |= SCE_PAD_BUTTON_OPTIONS
     else:
-        # Left Joy-Con button mapping -> PS Move
-        if btn_left & 0x01:  # Down -> Cross (Confirm)
+        # Left Joy-Con button mapping -> PS Move + PS4/PS5 UI Pad
+        pad_btns |= decode_stick_dpad(report[6:9])
+        if btn_left & 0x01:  # Down -> Cross / Down
             move_btns |= SCE_MOVE_BUTTON_CROSS
-        if btn_left & 0x08:  # Left -> Circle (Back)
+            pad_btns |= SCE_PAD_BUTTON_DOWN
+        if btn_left & 0x08:  # Left -> Circle / Left
             move_btns |= SCE_MOVE_BUTTON_CIRCLE
-        if btn_left & 0x02:  # Up -> Triangle
+            pad_btns |= SCE_PAD_BUTTON_LEFT
+        if btn_left & 0x02:  # Up -> Triangle / Up
             move_btns |= SCE_MOVE_BUTTON_TRIANGLE
-        if btn_left & 0x04:  # Right -> Square
+            pad_btns |= SCE_PAD_BUTTON_UP
+        if btn_left & 0x04:  # Right -> Square / Right
             move_btns |= SCE_MOVE_BUTTON_SQUARE
-        if (btn_left & 0x40) or (btn_shared & 0x20):  # L or Capture -> Move button
-            move_btns |= SCE_MOVE_BUTTON_MOVE
-        if btn_left & 0x80:  # ZL -> T trigger
-            move_btns |= SCE_MOVE_BUTTON_T
+            pad_btns |= SCE_PAD_BUTTON_RIGHT
+        if (btn_left & 0x40) or (btn_shared & 0x20):  # L or Capture -> Move + Cross
+            move_btns |= SCE_MOVE_BUTTON_MOVE | SCE_MOVE_BUTTON_CROSS
+            pad_btns |= SCE_PAD_BUTTON_CROSS
+        if btn_left & 0x80:  # ZL -> T trigger + R2
+            move_btns |= SCE_MOVE_BUTTON_T | SCE_MOVE_BUTTON_MOVE
+            pad_btns |= SCE_PAD_BUTTON_R2
             trigger = 255
-        if btn_shared & 0x01:  # Minus -> Start
+        if btn_shared & 0x01:  # Minus -> Start / Options
             move_btns |= SCE_MOVE_BUTTON_START
+            pad_btns |= SCE_PAD_BUTTON_OPTIONS
 
     # 3 IMU samples per packet at offsets 13, 25, 37; average available samples
     samples = 0
@@ -149,7 +203,7 @@ def parse_joycon_report(report, is_left):
 
     accel = (ax_sum / samples, ay_sum / samples, az_sum / samples)
     gyro = (gx_sum / samples, gy_sum / samples, gz_sum / samples)
-    return move_btns, trigger, accel, gyro
+    return move_btns, trigger, pad_btns, accel, gyro
 
 
 def run_simulation(sock, target):
@@ -159,14 +213,14 @@ def run_simulation(sock, target):
         t = time.time() - t0
         # Rhythmic 120 BPM arm swing
         omega = 2.0 * math.pi * 2.0
-        ax = 1.4 * math.sin(omega * t)
-        ay = 0.9 * math.cos(omega * t)
-        az = 1.0 + 0.6 * math.sin(2.0 * omega * t)
-        gx = 2.5 * math.cos(omega * t)
-        gy = -2.0 * math.sin(omega * t)
-        gz = 1.2 * math.sin(omega * t)
+        ax = 1.8 * math.sin(omega * t)
+        ay = 1.4 * math.cos(omega * t)
+        az = 1.0 + 0.9 * math.sin(2.0 * omega * t)
+        gx = 3.5 * math.cos(omega * t)
+        gy = -2.8 * math.sin(omega * t)
+        gz = 1.8 * math.sin(omega * t)
 
-        pkt = pack_jdm1(0, JDM_SOURCE_GENERIC, 0, 0, (ax, ay, az), (gx, gy, gz))
+        pkt = pack_jdm1(0, JDM_SOURCE_GENERIC, 0, 0, 0, (ax, ay, az), (gx, gy, gz))
         sock.sendto(pkt, target)
         time.sleep(0.01)
 
@@ -221,9 +275,9 @@ def main():
                     any_read = True
                     parsed = parse_joycon_report(report, is_left)
                     if parsed is not None:
-                        btns, trig, accel, gyro = parsed
+                        btns, trig, pad_btns, accel, gyro = parsed
                         src_flag = JDM_SOURCE_JOYCON_L if is_left else JDM_SOURCE_JOYCON_R
-                        pkt = pack_jdm1(slot, src_flag, btns, trig, accel, gyro)
+                        pkt = pack_jdm1(slot, src_flag, btns, trig, pad_btns, accel, gyro)
                         sock.sendto(pkt, target)
             if not any_read:
                 time.sleep(0.002)

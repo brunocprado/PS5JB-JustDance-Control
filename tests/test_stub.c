@@ -81,6 +81,7 @@ typedef int (*read_latest_fn)(int, SceMoveData *);
 typedef int (*read_recent_fn)(int, int64_t, SceMoveData *, int32_t *);
 typedef int (*set_light_fn)(int, uint8_t, uint8_t, uint8_t);
 typedef int (*set_vib_fn)(int, uint8_t);
+typedef int (*pad_read_state_fn)(int, void *);
 
 static init_fn h_init;
 static term_fn h_term;
@@ -91,6 +92,13 @@ static read_latest_fn h_read_latest;
 static read_recent_fn h_read_recent;
 static set_light_fn h_set_light;
 static set_vib_fn h_set_vib;
+static pad_read_state_fn h_pad_read_state;
+
+static int mock_pad_read_state(int handle, void *data) {
+    (void)handle;
+    memset(data, 0, sizeof(ScePadDataPrefix));
+    return 0;
+}
 
 static void load_stub(uintptr_t hint) {
     FILE *f = fopen(STUB_BIN_PATH, "rb");
@@ -124,6 +132,7 @@ static void load_stub(uintptr_t hint) {
     hdr->orig_get_device_info = (uint64_t)(uintptr_t)mock_get_device_info;
     hdr->orig_read_state_latest = (uint64_t)(uintptr_t)mock_read_latest;
     hdr->orig_read_state_recent = (uint64_t)(uintptr_t)mock_read_recent;
+    hdr->orig_pad_read_state = (uint64_t)(uintptr_t)mock_pad_read_state;
 
     h_init = (init_fn)(image + hdr->hook_init);
     h_term = (term_fn)(image + hdr->hook_term);
@@ -134,6 +143,7 @@ static void load_stub(uintptr_t hint) {
     h_read_recent = (read_recent_fn)(image + hdr->hook_read_state_recent);
     h_set_light = (set_light_fn)(image + hdr->hook_set_light_sphere);
     h_set_vib = (set_vib_fn)(image + hdr->hook_set_vibration);
+    h_pad_read_state = (pad_read_state_fn)(image + hdr->hook_pad_read_state);
 }
 
 static void check_abi_layout(void) {
@@ -192,12 +202,19 @@ static void check_virtual_move_flow(void) {
     CHECK_EQ(state[0].pad.digital_buttons, SCE_MOVE_BUTTON_MOVE | SCE_MOVE_BUTTON_CROSS | SCE_MOVE_BUTTON_T, "buttons");
     CHECK_EQ(state[0].pad.analog_t, 240, "analog T");
 
-    /* ReadStateRecent must advance timestamp beyond cutoff */
+    /* ReadStateRecent must advance timestamp beyond cutoff and return num_History (4) samples */
     uint64_t prev_ts = state[0].timestamp;
     CHECK_EQ(h_read_recent(h0, (int64_t)prev_ts, state, &count), SCE_MOVE_OK, "sceMoveReadStateRecent");
-    CHECK_EQ(count, 1, "out_count == 1");
+    CHECK_EQ(count, 4, "out_count == 4 (num_History)");
     CHECK_EQ(state[0].timestamp > prev_ts, 1, "timestamp strictly increases");
-    CHECK_EQ(state[0].counter, 2, "sample counter increments");
+    CHECK_EQ(state[3].counter, 5, "sample counter increments across batch");
+
+    /* UI Navigation via scePadReadState hook */
+    hdr->controllers[0].pad_buttons = SCE_PAD_BUTTON_UP | SCE_PAD_BUTTON_L1;
+    ScePadDataPrefix pad_data;
+    CHECK_EQ(h_pad_read_state(1, &pad_data), 0, "scePadReadState hook");
+    CHECK_EQ((pad_data.buttons & (SCE_PAD_BUTTON_UP | SCE_PAD_BUTTON_L1 | SCE_PAD_BUTTON_CROSS)) != 0, 1,
+             "pad_buttons + Move Cross injected into ScePadData");
 
     /* Light sphere and vibration feedback stored in shared header */
     CHECK_EQ(h_set_light(h0, 255, 40, 120), SCE_MOVE_OK, "set light sphere");

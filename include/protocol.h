@@ -30,14 +30,15 @@
 #define JDM_SOURCE_PHONE    0x03 /* Smartphone (accel in m/s^2, gyro in deg/s) */
 
 /*
-    Native 32-byte binary UDP packet ("JDM1").
+    Native 36-byte binary UDP packet ("JDM1").
     Little-endian layout:
       offset  0: uint32_t magic        (0x314D444A = "JDM1")
       offset  4: uint8_t  player_index (0..3)
       offset  5: uint8_t  source_flags (JDM_SOURCE_*)
       offset  6: uint16_t buttons      (SCE_MOVE_BUTTON_* mask)
       offset  8: uint8_t  trigger      (0..255 analog T trigger)
-      offset  9: uint8_t  reserved[3]
+      offset  9: uint8_t  reserved
+      offset 10: uint16_t pad_buttons  (SCE_PAD_BUTTON_* mask for UI navigation)
       offset 12: float    accel[3]     (X, Y, Z)
       offset 24: float    gyro[3]      (X, Y, Z)
     Total: 36 bytes.
@@ -48,7 +49,8 @@ typedef struct __attribute__((packed)) jdm_packet {
     uint8_t source_flags;
     uint16_t buttons;
     uint8_t trigger;
-    uint8_t reserved[3];
+    uint8_t reserved;
+    uint16_t pad_buttons;
     float accel[3];
     float gyro[3];
 } jdm_packet_t;
@@ -60,6 +62,7 @@ typedef struct motion_sample {
     float gyro_rads[3];     /* PS Move frame: X, Y, Z in rad/s */
     uint16_t buttons;       /* SCE_MOVE_BUTTON_* */
     uint16_t trigger;       /* 0..255 */
+    uint32_t pad_buttons;   /* SCE_PAD_BUTTON_* for UI navigation */
 } motion_sample_t;
 
 /* Cemuhook / DSU protocol constants */
@@ -73,7 +76,7 @@ typedef struct motion_sample {
 /* Computes standard IEEE 802.3 CRC32 (used by DSU packets). */
 uint32_t protocol_crc32(const uint8_t *data, size_t len);
 
-/* Builds a 24-byte DSUC controller data subscription request packet for `slot` (0..3) or all slots (-1). */
+/* Builds a 28-byte DSUC controller data subscription request packet for `slot` (0..3) or all slots (-1). */
 size_t protocol_build_dsu_request(uint8_t *out_buf, size_t max_len, uint32_t client_id, int slot);
 
 /*

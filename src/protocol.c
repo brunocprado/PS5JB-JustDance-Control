@@ -180,6 +180,7 @@ static bool parse_jdm1(const uint8_t *buf, size_t len, float accel_scale, motion
     uint8_t flags = buf[5];
     uint16_t buttons = rd16_le(buf + 6);
     uint8_t trigger = buf[8];
+    uint16_t pad_buttons = rd16_le(buf + 10);
 
     float in_accel[3] = {
         rd_float_le(buf + 12),
@@ -196,6 +197,7 @@ static bool parse_jdm1(const uint8_t *buf, size_t len, float accel_scale, motion
     out->player_index = player;
     out->buttons = buttons;
     out->trigger = trigger ? trigger : ((buttons & SCE_MOVE_BUTTON_T) ? 255 : 0);
+    out->pad_buttons = pad_buttons;
     apply_source_transform(flags, in_accel, in_gyro, accel_scale, out->accel_g, out->gyro_rads);
     return true;
 }
@@ -245,15 +247,29 @@ static bool parse_dsu(const uint8_t *buf, size_t len, float accel_scale, motion_
     uint8_t l2_analog = buf[55];
 
     uint16_t move_btns = 0;
-    if (btn1 & 0x01) move_btns |= SCE_MOVE_BUTTON_SELECT;   /* Share / Minus */
-    if (btn1 & 0x08) move_btns |= SCE_MOVE_BUTTON_START;    /* Options / Plus */
-    if (btn2 & 0x80) move_btns |= SCE_MOVE_BUTTON_SQUARE;   /* Square / Y */
-    if (btn2 & 0x40) move_btns |= SCE_MOVE_BUTTON_CROSS;    /* Cross / B */
-    if (btn2 & 0x20) move_btns |= SCE_MOVE_BUTTON_CIRCLE;   /* Circle / A */
-    if (btn2 & 0x10) move_btns |= SCE_MOVE_BUTTON_TRIANGLE; /* Triangle / X */
-    if ((btn2 & 0x0C) || home) move_btns |= SCE_MOVE_BUTTON_MOVE; /* L1/R1/Home -> Move */
-    if ((btn2 & 0x03) || r2_analog > 64 || l2_analog > 64)
-        move_btns |= SCE_MOVE_BUTTON_T;                     /* L2/R2/ZL/ZR -> T */
+    uint32_t pad_btns  = 0;
+
+    if (btn1 & 0x01) { move_btns |= SCE_MOVE_BUTTON_SELECT; pad_btns |= SCE_PAD_BUTTON_SELECT; }
+    if (btn1 & 0x02) pad_btns |= SCE_PAD_BUTTON_L3;
+    if (btn1 & 0x04) pad_btns |= SCE_PAD_BUTTON_R3;
+    if (btn1 & 0x08) { move_btns |= SCE_MOVE_BUTTON_START;  pad_btns |= SCE_PAD_BUTTON_OPTIONS; }
+    if (btn1 & 0x10) pad_btns |= SCE_PAD_BUTTON_UP;
+    if (btn1 & 0x20) pad_btns |= SCE_PAD_BUTTON_RIGHT;
+    if (btn1 & 0x40) pad_btns |= SCE_PAD_BUTTON_DOWN;
+    if (btn1 & 0x80) pad_btns |= SCE_PAD_BUTTON_LEFT;
+
+    if (btn2 & 0x80) { move_btns |= SCE_MOVE_BUTTON_SQUARE;   pad_btns |= SCE_PAD_BUTTON_SQUARE; }
+    if (btn2 & 0x40) { move_btns |= SCE_MOVE_BUTTON_CROSS;    pad_btns |= SCE_PAD_BUTTON_CROSS; }
+    if (btn2 & 0x20) { move_btns |= SCE_MOVE_BUTTON_CIRCLE;   pad_btns |= SCE_PAD_BUTTON_CIRCLE; }
+    if (btn2 & 0x10) { move_btns |= SCE_MOVE_BUTTON_TRIANGLE; pad_btns |= SCE_PAD_BUTTON_TRIANGLE; }
+    if (btn2 & 0x08) { move_btns |= SCE_MOVE_BUTTON_MOVE;     pad_btns |= SCE_PAD_BUTTON_R1; }
+    if (btn2 & 0x04) { move_btns |= SCE_MOVE_BUTTON_MOVE;     pad_btns |= SCE_PAD_BUTTON_L1; }
+    if (home)        move_btns |= SCE_MOVE_BUTTON_MOVE;
+    if ((btn2 & 0x03) || r2_analog > 64 || l2_analog > 64) {
+        move_btns |= SCE_MOVE_BUTTON_T;
+        if ((btn2 & 0x02) || r2_analog > 64) pad_btns |= SCE_PAD_BUTTON_R2;
+        if ((btn2 & 0x01) || l2_analog > 64) pad_btns |= SCE_PAD_BUTTON_L2;
+    }
 
     uint16_t trig = r2_analog > l2_analog ? r2_analog : l2_analog;
     if ((move_btns & SCE_MOVE_BUTTON_T) && trig == 0)
@@ -273,6 +289,7 @@ static bool parse_dsu(const uint8_t *buf, size_t len, float accel_scale, motion_
     out->player_index = slot;
     out->buttons = move_btns;
     out->trigger = trig;
+    out->pad_buttons = pad_btns;
     out->accel_g[0] = ax * accel_scale;
     out->accel_g[1] = ay * accel_scale;
     out->accel_g[2] = az * accel_scale;
@@ -342,13 +359,15 @@ static bool parse_json_motion(const uint8_t *buf, size_t len, float accel_scale,
     if (!has_ax && !has_ay && !has_az)
         return false;
 
-    float player_f = 0.0f, gx = 0.0f, gy = 0.0f, gz = 0.0f, btn_f = 0.0f, trig_f = 0.0f, mode_f = 3.0f;
+    float player_f = 0.0f, gx = 0.0f, gy = 0.0f, gz = 0.0f;
+    float btn_f = 0.0f, trig_f = 0.0f, pad_f = 0.0f, mode_f = 3.0f;
     json_find_number(copy, "p", &player_f);
     json_find_number(copy, "gx", &gx);
     json_find_number(copy, "gy", &gy);
     json_find_number(copy, "gz", &gz);
     json_find_number(copy, "btn", &btn_f);
     json_find_number(copy, "trig", &trig_f);
+    json_find_number(copy, "pad", &pad_f);
     /* Default mode for JSON is JDM_SOURCE_PHONE (m/s^2 and deg/s) unless "mode":0 is passed */
     json_find_number(copy, "mode", &mode_f);
 
@@ -360,6 +379,7 @@ static bool parse_json_motion(const uint8_t *buf, size_t len, float accel_scale,
     float in_gyro[3]  = { gx, gy, gz };
     uint16_t btns = (uint16_t)((int)btn_f & 0xFFFF);
     uint16_t trig = (uint16_t)((int)trig_f & 0xFF);
+    uint32_t pad_btns = (uint32_t)((unsigned int)pad_f & 0xFFFFu);
     if ((btns & SCE_MOVE_BUTTON_T) && trig == 0)
         trig = 255;
 
@@ -367,6 +387,7 @@ static bool parse_json_motion(const uint8_t *buf, size_t len, float accel_scale,
     out->player_index = player;
     out->buttons = btns;
     out->trigger = trig;
+    out->pad_buttons = pad_btns;
     apply_source_transform((uint8_t)mode_f, in_accel, in_gyro, accel_scale, out->accel_g, out->gyro_rads);
     return true;
 }

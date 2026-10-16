@@ -1,12 +1,12 @@
 /*
     inject.c - PS5JustDance
-    Injection of the libSceMove hook stub into a Just Dance process.
+    Injection of the libSceMove + libScePad hook stub into a Just Dance process.
 
     How it works:
-    1. Resolve the real libSceMove functions inside the game process
-       (kernel_dynlib_dlsym / nid_encode).
+    1. Resolve the real libSceMove and libScePad functions inside the game
+       process (kernel_dynlib_dlsym / nid_encode).
     2. Scan the game's readable data segments for GOT/import slots that
-       point to those libSceMove functions.
+       point to those functions.
     3. Attach with ptrace, allocate an executable region via remote mmap,
        copy stub.bin with the original pointers filled in, and redirect the
        import slots to the stub's hooks.
@@ -61,7 +61,7 @@ extern const uint8_t stub_blob_end[];
 #define MMAP_ALIGN          0x4000
 
 /* ------------------------------------------------------------------ */
-/* libSceMove imports we hook                                          */
+/* libSceMove + libScePad imports we hook                              */
 /* ------------------------------------------------------------------ */
 
 enum {
@@ -75,6 +75,8 @@ enum {
     H_SET_LIGHT,
     H_RESET_LIGHT,
     H_SET_VIBRATION,
+    H_PAD_READ_STATE,
+    H_PAD_READ,
     H_COUNT
 };
 
@@ -89,6 +91,8 @@ static const char *const hook_names[H_COUNT] = {
     "sceMoveSetLightSphere",
     "sceMoveResetLightSphere",
     "sceMoveSetVibration",
+    "scePadReadState",
+    "scePadRead",
 };
 
 typedef struct move_funcs {
@@ -231,17 +235,30 @@ bool inject_has_scemove_loaded(pid_t pid) {
 }
 
 static inject_result_t resolve_scemove(pid_t pid, move_funcs_t *m) {
-    static const char *const names[] = { "libSceMove.sprx", "libSceMove" };
-    uint32_t handle = 0;
-    if (!find_module(pid, names, 2, &handle))
+    static const char *const move_names[] = { "libSceMove.sprx", "libSceMove" };
+    uint32_t move_handle = 0;
+    if (!find_module(pid, move_names, 2, &move_handle))
         return INJECT_NOT_READY;
 
-    for (int i = 0; i < H_COUNT; i++) {
+    for (int i = 0; i <= H_SET_VIBRATION; i++) {
         char nid[12];
-        intptr_t addr = kernel_dynlib_dlsym(pid, handle, hook_names[i]);
+        intptr_t addr = kernel_dynlib_dlsym(pid, move_handle, hook_names[i]);
         if (addr == 0)
-            addr = kernel_dynlib_resolve(pid, handle, nid_encode(hook_names[i], nid));
+            addr = kernel_dynlib_resolve(pid, move_handle, nid_encode(hook_names[i], nid));
         m->fn[i] = addr;
+    }
+
+    /* Optional: resolve libScePad for UI menu navigation */
+    static const char *const pad_names[] = { "libScePad.sprx", "libScePad" };
+    uint32_t pad_handle = 0;
+    if (find_module(pid, pad_names, 2, &pad_handle)) {
+        for (int i = H_PAD_READ_STATE; i < H_COUNT; i++) {
+            char nid[12];
+            intptr_t addr = kernel_dynlib_dlsym(pid, pad_handle, hook_names[i]);
+            if (addr == 0)
+                addr = kernel_dynlib_resolve(pid, pad_handle, nid_encode(hook_names[i], nid));
+            m->fn[i] = addr;
+        }
     }
 
     if (m->fn[H_OPEN] == 0 || (m->fn[H_READ_RECENT] == 0 && m->fn[H_READ_LATEST] == 0)) {
@@ -545,6 +562,8 @@ static uint64_t stub_hook_offset(const stub_header_t *hdr, int hook) {
         case H_SET_LIGHT:       return hdr->hook_set_light_sphere;
         case H_RESET_LIGHT:     return hdr->hook_reset_light_sphere;
         case H_SET_VIBRATION:   return hdr->hook_set_vibration;
+        case H_PAD_READ_STATE:  return hdr->hook_pad_read_state;
+        case H_PAD_READ:        return hdr->hook_pad_read;
     }
     return 0;
 }
@@ -673,6 +692,8 @@ inject_result_t inject_stub(pid_t pid, uint32_t flags, injection_t *inj) {
     ihdr->orig_set_light_sphere   = (uint64_t)move.fn[H_SET_LIGHT];
     ihdr->orig_reset_light_sphere = (uint64_t)move.fn[H_RESET_LIGHT];
     ihdr->orig_set_vibration      = (uint64_t)move.fn[H_SET_VIBRATION];
+    ihdr->orig_pad_read_state     = (uint64_t)move.fn[H_PAD_READ_STATE];
+    ihdr->orig_pad_read           = (uint64_t)move.fn[H_PAD_READ];
 
     int werr = proc_write_chunked(pid, base, image, blob_size);
     stub_header_t verify;

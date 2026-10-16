@@ -28,6 +28,7 @@
 #define STUB_TRACE_READ_RECENT  0x06 /* a=handle, b=buttons, c=out_count */
 #define STUB_TRACE_LIGHT_SPHERE 0x07 /* a=handle, b=(r<<16)|(g<<8)|b */
 #define STUB_TRACE_VIBRATION    0x08 /* a=handle, b=motor */
+#define STUB_TRACE_PAD_INJECT   0x09 /* a=handle, b=pad_buttons */
 
 #define STUB_TRACE_SLOTS 64
 
@@ -49,19 +50,19 @@ typedef struct stub_controller_state {
     uint32_t gyro_bits[3];     /* IEEE-754 float[3]: X, Y, Z in rad/s */
     uint16_t buttons;          /* SCE_MOVE_BUTTON_* bitmask */
     uint16_t trigger;          /* 0..255 analog T trigger */
+    uint32_t pad_buttons;      /* SCE_PAD_BUTTON_* bitmask for UI navigation */
     uint64_t timestamp_us;     /* monotonic timestamp in microseconds */
     uint8_t led_r;             /* last sphere color requested by game */
     uint8_t led_g;
     uint8_t led_b;
     uint8_t vibration;         /* last vibration intensity requested by game */
-    uint32_t reserved;
 } stub_controller_state_t;
 
 typedef struct stub_header {
     uint32_t magic;
     uint32_t abi_version;
     uint32_t flags;            /* STUB_FLAG_* */
-    uint32_t num_History;      /* number of samples to return in sceMoveReadStateRecent (default 1) */
+    uint32_t num_History;      /* number of samples to return in sceMoveReadStateRecent */
     uint64_t image_end;        /* total size of the stub image in memory, including .bss */
 
     /* Hook entry points as offsets from the start of the stub image (set at link time) */
@@ -75,8 +76,10 @@ typedef struct stub_header {
     uint64_t hook_set_light_sphere;
     uint64_t hook_reset_light_sphere;
     uint64_t hook_set_vibration;
+    uint64_t hook_pad_read_state;
+    uint64_t hook_pad_read;
 
-    /* Real libSceMove functions in the game process (filled by injector, 0 if not resolved) */
+    /* Real libSceMove + libScePad functions in the game process (filled by injector) */
     uint64_t orig_init;
     uint64_t orig_term;
     uint64_t orig_open;
@@ -87,6 +90,8 @@ typedef struct stub_header {
     uint64_t orig_set_light_sphere;
     uint64_t orig_reset_light_sphere;
     uint64_t orig_set_vibration;
+    uint64_t orig_pad_read_state;
+    uint64_t orig_pad_read;
 
     /* Shared virtual controller states for up to 4 players (written by daemon) */
     stub_controller_state_t controllers[SCE_MOVE_MAX_PLAYERS];
